@@ -175,6 +175,65 @@ Per-investor positions are therefore out of reach by design. Only the investor, 
 3. **Route:** add the path to `Paths.Funds`, a handler in `FundRoutes`, and register it in `apiRouter`.
 4. **Test:** add cases to `tests/funds.test.ts`, stubbing the new repo function with `vi.spyOn` so the suite never touches the testnet.
 
+## Architecture for sending transactions
+
+Nothing below is implemented: today the API only reads, holds no keys and signs nothing. This is the intended shape for when it has to write to the chain.
+
+**The rule: the API never sends transactions.** It records intent in the database and enqueues a job; a dedicated sender worker owns the signing key, the nonce, and the lifecycle of every transaction.
+
+```mermaid
+sequenceDiagram
+    participant API
+    participant DB as Postgres
+    participant Q as Queue, BullMQ or SQS
+    participant W as Sender worker
+    participant K as KMS signer
+    participant C as Chain
+
+    API->>DB: insert mint_request, status queued
+    API->>Q: enqueue job(id)
+    API-->>API: 202 Accepted
+    Q->>W: job(id)
+    W->>DB: reserve nonce, status signing
+    W->>K: sign tx
+    W->>DB: save raw tx and hash, status submitted
+    W->>C: eth_sendRawTransaction
+    C-->>W: receipt after N confirmations
+    W->>DB: status confirmed
+```
+
+The sender saves the signed transaction and its hash before broadcasting, so after a crash it can rebroadcast the same bytes instead of signing a duplicate.
+
+### Nonce management
+
+- Each sender address has one strictly increasing nonce. Two workers using the same key will collide, so either run one worker per key (a single-concurrency queue) or take a DB row lock: `SELECT next_nonce FROM signers WHERE address=$1 FOR UPDATE`, increment, commit.
+- Don't trust `getTransactionCount(addr, 'pending')` alone under load; the mempool view differs between RPC nodes. Track nonces yourself and reconcile against `latest` on startup.
+- A nonce gap (nonce 41 never mined) blocks every later transaction. Detect gaps and fill them, for example with a zero-value self-transfer at that nonce.
+- Throughput: more signer addresses means more parallel lanes. One lane per key is the simple, safe default.
+
+### Stuck and failed transactions
+
+| Situation | Detect | Action |
+|---|---|---|
+| Pending too long (underpriced) | No receipt after X blocks | Resend the same nonce with the fee bumped by at least 10% (both `maxFeePerGas` and `maxPriorityFeePerGas`) |
+| Dropped from mempool | RPC no longer knows the hash | Rebroadcast the saved raw tx, or re-sign the same nonce |
+| Reverted onchain | Receipt `status: 0` | Don't retry blindly: decode the revert reason. The nonce is consumed; mark failed and alert |
+| Replaced | A different hash mined at your nonce | Look up which tx mined at that nonce and update the record |
+| RPC timeout on send | Unknown | Assume it may have been sent; check by hash before re-signing |
+
+Always `estimateGas` (and ideally simulate with `eth_call`) before sending. A compliance check in an ERC-3643 token that would revert should fail in the service, not onchain at the cost of gas.
+
+### Queue and retries
+
+- BullMQ (Redis) or SQS give at-least-once delivery, so every job handler must be idempotent: check the DB status first and skip if already submitted.
+- Use exponential backoff with jitter, and separate transient errors (RPC timeout, 429, a nonce-too-low race) from permanent ones (revert, validation). Retry only the transient ones.
+- Add a dead-letter queue plus an alert for jobs that exhaust their retries, and let a human decide.
+- SQS FIFO with `MessageGroupId` set to the signer address gives ordered, one-at-a-time processing per key.
+
+### Key management
+
+Keep keys in AWS KMS as `ECC_SECG_P256K1` keys. The worker calls `kms:Sign` on the transaction digest and never sees the private key, and IAM grants that permission only to the worker's role. CloudTrail then holds an audit log of every signature, which regulators like. For client assets, an MPC custody provider such as Fireblocks often replaces KMS.
+
 ## Authentication options
 
 `GET /api/funds/:symbol/supply` is currently open. This section describes the ways it could be protected when a React app consumes it, and what each one is actually good for. No approach has been implemented yet.
