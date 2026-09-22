@@ -234,6 +234,48 @@ Always `estimateGas` (and ideally simulate with `eth_call`) before sending. A co
 
 Keep keys in AWS KMS as `ECC_SECG_P256K1` keys. The worker calls `kms:Sign` on the transaction digest and never sees the private key, and IAM grants that permission only to the worker's role. CloudTrail then holds an audit log of every signature, which regulators like. For client assets, an MPC custody provider such as Fireblocks often replaces KMS.
 
+### Running the sender worker on AWS
+
+The worker splits into two jobs that must not be combined: a **submitter** that signs and broadcasts one transaction, and a **reconciler** that watches pending transactions and decides whether to bump, rebroadcast or fail them. Waiting for confirmations inside the submitter would hold a queue message (or bill Lambda time) for minutes, and it loses the work entirely if the process dies mid-wait.
+
+```mermaid
+flowchart LR
+    API[API on ECS Fargate] -->|insert intent| DB[(RDS Postgres)]
+    API -->|SendMessage| Q[SQS FIFO<br/>MessageGroupId = signer address]
+    Q --> S[Submitter Lambda]
+    S -->|kms:Sign on digest| KMS[KMS key<br/>ECC_SECG_P256K1]
+    S -->|save raw tx + hash| DB
+    S -->|eth_sendRawTransaction| RPC[COTI RPC endpoint]
+    Q -.->|maxReceiveCount exceeded| DLQ[Dead-letter queue]
+    DLQ --> SNS[CloudWatch alarm to SNS]
+    EB[EventBridge Scheduler] --> R[Reconciler Lambda]
+    R -->|receipts, fee bumps| RPC
+    R -->|status confirmed / failed| DB
+```
+
+**Components**
+
+| Concern | Service | Notes |
+|---|---|---|
+| Queue | SQS FIFO | `MessageGroupId` = signer address, `MessageDeduplicationId` = request id (the dedupe window is 5 minutes, so the DB status check is still the real idempotency guard). |
+| Submitter | Lambda, or an ECS Fargate consumer | Lambda's SQS FIFO event source runs at most one invocation per message group, which serialises a signer's nonce for free. Fargate needs one consumer per key to get the same guarantee. |
+| Reconciler | Lambda on an EventBridge schedule | Runs every few seconds to a minute over transactions in `submitted`, applying the stuck-and-failed table above. |
+| State | RDS or Aurora Postgres | Holds the intent rows and the `signers` table the nonce lock lives in. DynamoDB works too, with a conditional update or atomic counter in place of `SELECT ... FOR UPDATE`. |
+| Signing | KMS | One key per signer lane. |
+| Config | SSM Parameter Store or Secrets Manager | RPC URL, contract addresses, tuning values. |
+
+**Signing with KMS, in detail.** Ethereum signs a 32-byte keccak digest, so call `Sign` with `MessageType: DIGEST` and `SigningAlgorithm: ECDSA_SHA_256`, which tells KMS to sign the bytes as given rather than hashing them again. KMS returns a DER-encoded signature, and turning it into an Ethereum one takes three steps: parse out `r` and `s`; normalise `s` to the lower half of the curve order, since EIP-2 rejects the high form; then recover `v` by trying both recovery ids and keeping the one that recovers the signer's address. The address itself comes from `GetPublicKey`, whose DER answer holds the uncompressed point to keccak-hash. Libraries such as `@rumblefishdev/eth-signer-kms` package all of this, and are worth using rather than re-deriving.
+
+**Ordering and concurrency.** One KMS key equals one nonce lane equals one message group. Scale throughput by adding signer addresses and granting each the agent role onchain, never by raising concurrency on a single key. If you use Fargate instead of Lambda, run one service per key rather than one service with several tasks, and keep queue polling long (20s) to avoid busy loops.
+
+**Retries and failure.** Set the queue's visibility timeout above the submitter's worst case, including the KMS call and RPC retries, so a slow run isn't delivered twice. Keep `maxReceiveCount` low (3 or so), and alarm on the DLQ's depth as well as on `ApproximateAgeOfOldestMessage`, which catches a lane wedged by a nonce gap. Emit the age of the oldest unconfirmed transaction as a custom CloudWatch metric; that single number tends to be the best early warning that the chain, the fee market or a nonce has gone wrong.
+
+**Network and IAM.** Put Lambdas and tasks in private subnets. Reaching a public RPC endpoint needs a NAT gateway, while KMS, SQS, Secrets Manager and CloudWatch can go through VPC interface endpoints, which keeps that traffic off the internet and cuts NAT cost. Give the submitter's role `kms:Sign` and `kms:GetPublicKey` on exactly one key ARN and nothing else, and let the key policy name that role; the API's own role should have no KMS permission at all, only `sqs:SendMessage`. Asymmetric KMS keys don't support automatic rotation, so plan key changes as an onchain role migration: authorise the new signer, drain the old lane, revoke it.
+
+**Observability.** CloudTrail records every `Sign` call, which is the audit trail regulators ask for; keep it in an account the worker can't write to. Log the request id, nonce, transaction hash and status transition on one structured line each, so a transaction's whole life can be read from its id.
+
+**The smallest setup that works:** one SQS FIFO queue, one submitter Lambda, one reconciler Lambda on a one-minute schedule, one KMS key, one Postgres table for intents plus one for nonces, and a DLQ alarm. Reach for more signer keys, ECS consumers or Step Functions only when a real limit pushes you there.
+
 ## Authentication options
 
 `GET /api/funds/:symbol/supply` is currently open. This section describes the ways it could be protected when a React app consumes it, and what each one is actually good for. No approach has been implemented yet.
