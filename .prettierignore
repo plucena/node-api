@@ -10,3 +10,6 @@
 !src/**
 !test/**
 !scripts/**
+
+# Vendored byte-for-byte from plucena/rwa; reformatting would break the drift check
+src/vendor/

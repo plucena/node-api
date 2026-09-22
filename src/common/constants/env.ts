@@ -1,4 +1,4 @@
-import jetEnv, { num } from 'jet-env';
+import jetEnv, { num, str } from 'jet-env';
 import tspo from 'tspo';
 
 /******************************************************************************
@@ -19,6 +19,7 @@ export const NodeEnvs = {
 const EnvVars = jetEnv({
   NodeEnv: (v) => tspo.isValue(NodeEnvs, v),
   Port: num,
+  CotiRpcUrl: str,
 });
 
 /******************************************************************************

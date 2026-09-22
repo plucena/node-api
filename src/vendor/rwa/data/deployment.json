@@ -1,0 +1,41 @@
+{
+  "network": "coti-testnet",
+  "chainId": 7082400,
+  "deployedAt": "2026-08-10T18:13:47.431Z",
+  "deployer": "0xAb81c57CCc578a5636BFF47B896BEC6Af1c30012",
+  "accountOnboard": "0x686035856C60D73843C839ad50eDC6c40385C825",
+  "paymentTokens": {
+    "USDC": {
+      "address": "0x63f3D2Cc8F5608F57ce6E5Aa3590A2Beb428D19C",
+      "decimals": 6,
+      "symbol": "USDC.e"
+    },
+    "USDT": {
+      "address": "0x9e961430053cd5AbB3b060544cEcCec848693Cf0",
+      "decimals": 6,
+      "symbol": "USDT"
+    }
+  },
+  "funds": {
+    "JTRSY": {
+      "name": "Janus Henderson Treasury Fund",
+      "symbol": "JTRSY",
+      "decimals": 8,
+      "token": "0x6D7cf587dbF68eb233B7BEd1f45BDfB6aE31Baf3",
+      "registry": "0x9Da490afb22cEb1B8aA82d2EC4418BB4A62e5F37",
+      "compliance": "0xB5d2e8880005dCF84f13Fc58626d7F67734E28CB",
+      "subscription": "0x5cf23F0cf6369477d1F267e5f9F281C3e6B8A98f",
+      "priceUsd": 1.112439
+    },
+    "JAAA": {
+      "name": "Janus Henderson AAA CLO Fund",
+      "symbol": "JAAA",
+      "decimals": 8,
+      "token": "0x20b2C3cc4F7b4a5f727b1aa69779aD9C20036732",
+      "registry": "0xC64DC85109E823380ea4DE34b6ac1B22a02Ba23E",
+      "compliance": "0x2abfd1194120fb2BDc2D3Fd8366C2979c7aea531",
+      "subscription": "0x0A1089dc8b71E463c3AD89363058B5a07A7f1bf9",
+      "priceUsd": 1.04445
+    }
+  }
+}

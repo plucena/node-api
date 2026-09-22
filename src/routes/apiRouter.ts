@@ -2,6 +2,7 @@ import { Router } from 'express';
 
 import Paths from '@src/common/constants/Paths';
 
+import FundRoutes from './FundRoutes';
 import UserRoutes from './UserRoutes';
 
 /******************************************************************************
@@ -20,6 +21,14 @@ userRouter.put(Paths.Users.Update, UserRoutes.update);
 userRouter.delete(Paths.Users.Delete, UserRoutes.delete);
 
 apiRouter.use(Paths.Users._, userRouter);
+
+// ----------------------- Add FundRouter --------------------------------- //
+
+const fundRouter = Router();
+
+fundRouter.get(Paths.Funds.Supply, FundRoutes.getSupply);
+
+apiRouter.use(Paths.Funds._, fundRouter);
 
 /******************************************************************************
                                 Export

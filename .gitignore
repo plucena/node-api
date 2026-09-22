@@ -2,3 +2,9 @@
 dist/
 **/**/*.log
 tsconfig.tsbuildinfo
+
+# Local symlinks to the rwa checkout. Nothing here may reference them: the API
+# uses its own copy in src/vendor/rwa (see scripts/sync-contracts.ts). No
+# trailing slash, so the patterns match the symlinks themselves.
+/rwa
+/rwa-ui

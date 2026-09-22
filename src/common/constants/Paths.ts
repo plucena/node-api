@@ -9,6 +9,10 @@ const Paths = {
     Update: '/update',
     Delete: '/delete/:id',
   },
+  Funds: {
+    _: '/funds',
+    Supply: '/:symbol/supply',
+  },
 } as const;
 
 export const JetPaths = jetPaths(Paths);

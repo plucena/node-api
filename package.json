@@ -14,7 +14,9 @@
     "start": "cross-env DOTENV_CONFIG_PATH=./config/.env.production node -r dotenv/config -r module-alias/register ./dist/main.js",
     "sync": "delay 1s && browser-sync start --config bs-config.js",
     "test": "cross-env NODE_ENV=test vitest",
-    "type-check": "tsc -b --noEmit"
+    "type-check": "tsc -b --noEmit",
+    "sync:contracts": "ts-node scripts/sync-contracts.ts",
+    "check:contracts": "ts-node scripts/sync-contracts.ts --check"
   },
   "engines": {
     "node": ">=16.0.0"
@@ -36,7 +38,8 @@
     "jsonfile": "^6.2.1",
     "module-alias": "^2.3.4",
     "morgan": "^1.12.1",
-    "tspo": "^1.0.7"
+    "tspo": "^1.0.7",
+    "viem": "^2.56.8"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
