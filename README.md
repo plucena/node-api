@@ -86,6 +86,53 @@ routes/FundRoutes.ts        getSupply        validate :symbol
 
 `FundRepo` is the only module that talks to the chain, which is why the tests stub it there.
 
+### The round trip through viem
+
+[viem](https://viem.sh) is the EVM client library doing the actual chain access. It turns a typed function call into an `eth_call` JSON-RPC request, and the 32-byte answer back into a `bigint`. Nothing else in the API speaks that protocol.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant React as React app
+    participant Route as FundRoutes.getSupply
+    participant Svc as FundService
+    participant Repo as FundRepo
+    participant Viem as viem client, repos/common/coti.ts
+    participant Node as COTI RPC node
+    participant Token as PrivateToken JTRSY
+
+    React->>Route: GET /api/funds/JTRSY/supply
+    Route->>Svc: getSupply("JTRSY")
+    Svc->>Repo: find("JTRSY")
+    Repo-->>Svc: token address and decimals, from deployment.json
+    alt cached less than 10s ago
+        Svc-->>Route: cached supply
+    else cache miss
+        Svc->>Repo: getTotalSupply(fund)
+        Repo->>Viem: readContract, functionName totalSupply
+        Note over Viem: encodes calldata 0x18160ddd<br/>from PRIVATE_TOKEN_ABI
+        Viem->>Node: eth_call to 0x6D7c...Baf3 at block latest
+        Note over Viem,Node: HTTP 502 retries up to 6 times,<br/>backoff from 100ms, 5s per attempt
+        Node->>Token: run totalSupply() against latest state
+        Token-->>Node: 0x0...2e266c1e70
+        Node-->>Viem: JSON-RPC result 0x0...2e266c1e70
+        Note over Viem: decodes per ABI to 198213115504n
+        Viem-->>Repo: 198213115504n as bigint
+        Repo-->>Svc: 198213115504n
+        Note over Svc: formatUnits(raw, 8) gives "1982.13115504"<br/>cached for 10s
+    end
+    Svc-->>Route: symbol, token, raw, decimals, formatted
+    Route-->>React: 200 with the supply object
+```
+
+Three things in that exchange are worth naming, because they're what viem contributes:
+
+- **ABI encoding and decoding.** `PRIVATE_TOKEN_ABI` is built with viem's `parseAbi`, so `totalSupply` becomes the 4-byte selector `0x18160ddd` on the way out and a `bigint` on the way back. TypeScript knows that return type at compile time, so a wrong function name or argument list fails the build rather than a request.
+- **The transport.** `http()` carries the JSON-RPC call and owns retries, backoff and timeouts, which is what makes the intermittently failing testnet RPC survivable without any retry code of our own.
+- **The chain definition.** `defineChain` tells the client the chain id, native currency and known contracts, including Multicall3, which would let several reads share one request.
+
+Writes would use the same library through a wallet client, but this API only reads; it holds no keys and signs nothing.
+
 ### Where the ABIs and addresses come from
 
 The fund contracts and the investor dApp live in [plucena/rwa](https://github.com/plucena/rwa). The dApp's `app/src/lib/contracts.ts` (ABIs, chain id, explorer URL) and `app/src/data/deployment.json` (each fund's token, registry, compliance and subscription addresses) are the single source of truth, and this API uses copies of them:
@@ -95,7 +142,6 @@ src/vendor/rwa/lib/contracts.ts
 src/vendor/rwa/data/deployment.json
 ```
 
-- **Don't edit them here.** They are kept byte-for-byte identical to upstream. Change the file in plucena/rwa, push, then run `npm run sync:contracts` and commit the result.
 - **After a redeploy** of the contracts, the new addresses land in upstream `deployment.json`, and a sync brings them in.
 - **`npm run check:contracts`** fails if the copies have drifted, which makes it suitable for CI.
 - The sync script downloads from GitHub. The API never reads a local rwa checkout; a local `rwa` symlink, if you keep one for reference, is gitignored and excluded from tests.
