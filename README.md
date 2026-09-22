@@ -204,6 +204,33 @@ sequenceDiagram
 
 The sender saves the signed transaction and its hash before broadcasting, so after a crash it can rebroadcast the same bytes instead of signing a duplicate.
 
+### Idempotency keys
+
+Every write request carries an `Idempotency-Key` header. It exists for one failure: the client sends a request, the response is lost, and the client cannot tell whether the transaction was accepted. Retrying without a key risks a second mint; refusing to retry risks losing the request.
+
+**The client generates the key, never the server.** A client that never saw the response would have no server-issued key to retry with, which is the exact case the key is for. The React app creates one when the user commits to the action, with `crypto.randomUUID()`, and reuses that same value for every retry of that action, including after a timeout or a reload while the intent is still pending. A new key means a new intent.
+
+UUIDv7 is the preferred shape: random, but time-ordered, so it indexes with good locality and old keys cluster for cleanup. UUIDv4 and ULID are fine too. The server treats it as an opaque string, caps its length and rejects anything longer.
+
+**How the API honours it**
+
+- **Scope it per caller:** `UNIQUE (caller_id, endpoint, idempotency_key)`. A global scope would let one tenant burn another's key.
+- **Store a fingerprint** of the request body next to the key, such as a SHA-256 of its canonical JSON, so a key reused for different content can be told apart from an honest retry.
+- **Insert before working**, in the same transaction that records the intent. The unique violation *is* the concurrency guard: of two racing requests, one insert wins and the loser reads the winner's row. Don't check first and insert after.
+- **Keep keys for about 24 hours**, then purge. That covers any reasonable retry window.
+
+A repeat of a key already seen resolves like this:
+
+| Repeat request | Answer |
+|---|---|
+| Same fingerprint, still in flight | `409`, or `202` with the original request id |
+| Same fingerprint, finished | Replay the stored response, same status and body |
+| Different fingerprint | `422`: the key was reused for a different request |
+
+**Three layers, three hops.** The key is only the first guard. The API's unique constraint stops a duplicate intent row; the queue's `MessageDeduplicationId`, set to the same key, catches a duplicate enqueue, though SQS FIFO's dedupe window is only 5 minutes, so treat it as convenience rather than guarantee; and the nonce is the backstop, since a transaction signed at nonce 42 cannot be mined twice. The database row is what makes the API idempotent, but only the nonce makes the chain idempotent.
+
+**The natural-key alternative.** A key can instead be derived from the business facts, for example a hash of investor, fund, amount and intent id, which needs no client cooperation. It also collapses legitimate duplicates: two identical subscriptions a minute apart become one. Use it only where a true duplicate is impossible by definition, such as one subscription per investor per period.
+
 ### Nonce management
 
 - Each sender address has one strictly increasing nonce. Two workers using the same key will collide, so either run one worker per key (a single-concurrency queue) or take a DB row lock: `SELECT next_nonce FROM signers WHERE address=$1 FOR UPDATE`, increment, commit.
