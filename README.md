@@ -250,6 +250,37 @@ A repeat of a key already seen resolves like this:
 
 Always `estimateGas` (and ideally simulate with `eth_call`) before sending. A compliance check in an ERC-3643 token that would revert should fail in the service, not onchain at the cost of gas.
 
+### How the reconciler checks status
+
+There is no gRPC option: EVM nodes speak JSON-RPC over HTTP and WebSocket, and gRPC belongs to Cosmos-style chains and to Erigon's internal interfaces, not to a public EVM API. So the question is only which JSON-RPC calls to make, and against which node.
+
+What the public COTI testnet endpoint supports, checked against it directly:
+
+| Capability | Result |
+|---|---|
+| `eth_getTransactionReceipt`, `eth_getLogs`, JSON-RPC batching | Work; several calls fit in one HTTP request |
+| `eth_subscribe` over HTTP | `notifications not supported` |
+| WebSocket endpoint (`/ws`, `/websocket`) | 404, so push is unavailable on the shared endpoint |
+| Explorer API (cotiscan runs Blockscout) | Works, both `/api/v2/transactions/{hash}` and the Etherscan-style `gettxreceiptstatus` |
+
+On the public RPC the reconciler therefore polls. Push needs a node of your own.
+
+| Approach | Cost per tick | Catches | Notes |
+|---|---|---|---|
+| **Per-hash receipt polling** | One call per pending tx, batchable | Mined and reverted (`status: 0`) | The default; batching keeps it cheap while few transactions are in flight |
+| **Per-signer nonce check** | One call per signer | Whether anything can still be pending | `eth_getTransactionCount(addr, 'latest')` past your nonce with no receipt means replaced or dropped. The cheapest early filter |
+| **Head-following block scan** | One call per block | Everything, including replacements | `eth_getBlockByNumber(n, true)`, matched on sender and nonce. Scales with block rate rather than pending count, and identifies the transaction that took your nonce |
+| **`eth_getLogs` by contract and topic** | One call per range | Successful, event-emitting calls | A reverted transaction emits no logs, so logs alone cannot separate reverted from pending. Only useful when the event carries the intent id, and only alongside receipts |
+| **WebSocket `newHeads`** | Push | Head updates, with the lowest latency | Needs your own node and a long-lived process; Lambda cannot hold a socket |
+| **Explorer API** | One HTTP call | Mined and reverted | An indexer: it lags and rate-limits. Fine as a cross-check or for debugging by hand, wrong as the source of truth |
+| **Self-hosted indexer** (Ponder, Subsquid, Blockscout) | Push, into SNS or EventBridge | Whatever is indexed | Makes reconciliation event-driven, but is another service to run and still polls a node underneath |
+
+**Running a node yourself** buys WebSocket push, an honest mempool view and freedom from another operator's rate limits, at the price of a synced chain to look after: EC2 or ECS in a private subnet, in the workers' region, behind internal DNS, doubled if an outage would matter. That trade is more attractive on COTI testnet than on a mature chain, since the shared endpoint drops a large share of requests — but confirm what a node image and an initial sync actually involve before committing to it.
+
+**Suggested default.** Poll a cheap pair: one nonce check per signer per tick, and batched receipt polls only for transactions that can still be pending. That distinguishes mined, reverted and dropped in a handful of calls however many intents are in flight. Move to a head-following scan when volume makes per-hash polling noisy, and add your own node with WebSocket only when latency or rate limits actually hurt.
+
+One rule worth encoding: `eth_getTransactionByHash` returning null means *that node* has forgotten the transaction, and nodes disagree about pending state. Treat the `latest` nonce as truth, never the mempool view.
+
 ### Queue and retries
 
 - BullMQ (Redis) or SQS give at-least-once delivery, so every job handler must be idempotent: check the DB status first and skip if already submitted.
